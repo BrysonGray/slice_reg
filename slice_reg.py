@@ -369,6 +369,9 @@ def rigid_alignment_block(xI, I, xJ, J, A=None,
     Esave = []
     fig,ax = plt.subplots(2,3)
     ax = ax.ravel()
+    Lsave = []
+    Tsave = []
+    reduce_factor = 0.5
     for it in range(niter):
         Ai = torch.linalg.inv(A)
         Xs = (Ai[:2,:2]@XJ[...,None])[...,0] + Ai[:2,-1]
@@ -395,11 +398,12 @@ def rigid_alignment_block(xI, I, xJ, J, A=None,
                 # start with the whole image
                 M = torch.tensor(J.shape[1:],device=J.device)
             elif it == niter//4:
-                M = torch.tensor([64,64],device=J.device)
+                # M = torch.tensor([64,64],device=J.device)
+                M = torch.tensor([J.shape[1]//4,J.shape[1]//4],device=J.device)
             elif it == niter//2:
-                M = torch.tensor([32,32],device=J.device)
-            elif it == 3*niter//4:
-                M = torch.tensor([16,16],device=J.device)
+                M = torch.tensor([J.shape[1]//8,J.shape[1]//8],device=J.device)
+            # elif it == 3*niter//4:
+            #     M = torch.tensor([J.shape[1]//16,J.shape[1]//16],device=J.device)
 
             Jshape = torch.as_tensor(J.shape[1:],device=device)
             topad = Jshape%M
@@ -447,6 +451,24 @@ def rigid_alignment_block(xI, I, xJ, J, A=None,
         Esave.append(E.item())
         E.backward()
 
+        Tsave.append(A[:2,-1].detach().clone().squeeze().cpu().numpy())
+        Lsave.append(A[:2,:2].detach().clone().squeeze().reshape(-1).cpu().numpy())
+
+        if it > 10:
+            checksign0 = np.sign(Tsave[-1] - Tsave[-2])
+            checksign1 = np.sign(Tsave[-2] - Tsave[-3])
+            checksign2 = np.sign(Tsave[-3] - Tsave[-4])
+            reducedA = False
+            if np.any((checksign0 != checksign1)*(checksign1 != checksign2)):
+                epT *= reduce_factor
+                print(f'Iteration {it}, translation oscilating, reducing epT to {epT}')
+                reducedA = True
+            checksign0 = np.sign(Lsave[-1] - Lsave[-2])
+            checksign1 = np.sign(Lsave[-2] - Lsave[-3])
+            checksign2 = np.sign(Lsave[-3] - Lsave[-4])
+            if np.any( (checksign0 != checksign1)*(checksign1 != checksign2) ) and not reducedA:
+                epL *= reduce_factor
+                print(f'Iteration {it}, linear oscilating, reducing epL to {epL}')
         # update
         with torch.no_grad():
             A[:2,:2] -= A.grad[:2,:2]*epL
@@ -471,28 +493,32 @@ def rigid_alignment_block(xI, I, xJ, J, A=None,
                 elif Ishow.shape[-1] == 1:
                     Is = torch.stack((Ishow[...,0],Ishow[...,0],Ishow[...,0]),-1)
                 ax[0].imshow(Is)
+                
+                if it == 0:
+                    Jshow = J.clone().detach().permute(1,2,0).cpu()
+                    vmin = torch.quantile(Jshow,0.5)
+                    vmax = torch.quantile(Jshow,0.999)
+                    ax[2].cla()
+                    if Jshow.shape[-1] >= 3:
+                        ax[2].imshow(Jshow[...,:3], vmax=vmax, vmin=vmin)
+                    elif Jshow.shape[-1] == 2:
+                        Jshow = torch.stack((Jshow[...,0],Jshow[...,1],Jshow[...,0]),-1)
+                        ax[2].imshow(Jshow, vmax=vmax, vmin=vmin)
+                    elif Jshow.shape[-1] == 1:
+                        Jshow = torch.stack((Jshow[...,0],Jshow[...,0],Jshow[...,0]),-1)
+                        ax[2].imshow(Jshow, vmax=vmax, vmin=vmin)
+
                 ax[1].cla()
                 fAIshow = fAI.clone().detach().permute(1,2,0).cpu()
                 if fAIshow.shape[-1] >= 3: 
-                    ax[1].imshow(fAIshow[...,:3])
+                    ax[1].imshow(fAIshow[...,:3], vmax=vmax, vmin=vmin)
                 elif fAIshow.shape[-1] == 2:
                     fAIshow = torch.stack((fAIshow[...,0],fAIshow[...,1],fAIshow[...,0]),-1)
-                    ax[1].imshow(fAIshow)
+                    ax[1].imshow(fAIshow, vmax=vmax, vmin=vmin)
                 elif fAIshow.shape[-1] == 1:
                     fAIshow = torch.stack((fAIshow[...,0],fAIshow[...,0],fAIshow[...,0]),-1)
-                    ax[1].imshow(fAIshow)
+                    ax[1].imshow(fAIshow, vmax=vmax, vmin=vmin)
 
-                if it == 0:
-                    Jshow = J.clone().detach().permute(1,2,0).cpu()
-                    ax[2].cla()
-                    if Jshow.shape[-1] >= 3:
-                        ax[2].imshow(Jshow[...,:3])
-                    elif Jshow.shape[-1] == 2:
-                        Jshow = torch.stack((Jshow[...,0],Jshow[...,1],Jshow[...,0]),-1)
-                        ax[2].imshow(Jshow)
-                    elif Jshow.shape[-1] == 1:
-                        Jshow = torch.stack((Jshow[...,0],Jshow[...,0],Jshow[...,0]),-1)
-                        ax[2].imshow(Jshow)
                 ax[4].cla()
                 errshow = ((fAI-J).clone().detach()*0.5*2+0.5).permute(1,2,0).cpu()
                 if errshow.shape[-1] >= 3:
@@ -574,12 +600,13 @@ def register_slices(source_dir, target_dir, out_dir, ids=None, **kwargs):
         if I0.dtype == np.uint8:
             I0 = I0.astype(float)/255.0
         else:
-            I0 = I0.astype(float) / np.mean(I0.reshape(-1,I0.shape[-1], axis=0))
+            # I0 = I0.astype(float) / np.mean(I0.reshape(-1,I0.shape[-1], axis=0))
+            I0 = I0.astype(float) / np.max(I0, axis=(0,1))
         dI = np.array([dy,dx])
         nI = np.array(I0.shape[:-1])
         xI = [np.arange(n)*d - (n-1)*d/2 for n,d in zip(nI,dI)]
-        n_scatter = 4
-        n_init= 2
+        n_scatter = 3
+        n_init= 0
         n_final=0
     #     start_downsample1 = time.time()
         # downsample them and scatter
@@ -676,13 +703,14 @@ def register_slices(source_dir, target_dir, out_dir, ids=None, **kwargs):
         if J.dtype == np.uint8:
             J = J.astype(float)/255.0
         else:
-            J = J.astype(float) / np.mean(J.reshape((-1, J.shape[-1])), axis=0)
+            # J = J.astype(float) / np.mean(J.reshape((-1, J.shape[-1])), axis=0)
+            J = J.astype(float) / np.max(J, axis=(0,1))
         nJ = np.array(J.shape[:-1])
         dJ = np.array([dy,dx])
         xJ = [np.arange(n)*d - (n-1)*d/2 for n,d in zip(nJ,dJ)]
 
         n_scatter = 0
-        n_init=5
+        n_init=3
         n_final=0
     #     start_downsample2 = time.time()
         xJ, J,labels_ = downsample(nJ,xJ,J,['R','G','B'],n_scatter, n_init, n_final)
@@ -793,7 +821,8 @@ def transform_series(out_dir, src_dir, target_dir, transforms_dir, src_files, ta
         if I0.dtype == np.uint8:
             I0 = I0.astype(float)/255.0
         else:
-            I0 = I0.astype(float) / np.mean(I0.reshape((-1, I0.shape[-1])), axis=0)
+            # I0 = I0.astype(float) / np.mean(I0.reshape((-1, I0.shape[-1])), axis=0)
+            I0 = I0.astype(float) / np.max(I0, axis=(0,1))
         I = torch.tensor(I0,dtype=dtype,device=device)
         dI = np.array([dy,dx])
         nI = np.array(I0.shape)
